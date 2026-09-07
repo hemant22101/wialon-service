@@ -5,7 +5,7 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 10000;
 const WIALON_URL = 'https://hst-api.wialon.com/wialon/ajax.html';
-const TOKEN = process.env.WIALON_TOKEN || '0f2f81f1b6be4d0fecfad332f8b1e70aD8816EA7AFCB7791C22A44BFA7F56AB50DA0634F';
+const TOKEN = process.env.WIALON_TOKEN;
 const CLIENT_API_KEY = process.env.CLIENT_API_KEY || 'my_secret_client_key_123';
 
 let sessionId = null;
@@ -33,10 +33,20 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/vehicles', async (req, res) => {
+  // 1. Validate API Key
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
   }
+
+  // 2. Extract Query Parameters (Pagination & Search)
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 0; // 0 returns all units
+  const searchMask = req.query.search ? `*${req.query.search}*` : '*';
+
+  // Calculate range indices for Wialon
+  const from = limit > 0 ? (page - 1) * limit : 0;
+  const to = limit > 0 ? from + limit - 1 : 0;
 
   try {
     let eid = await getSession();
@@ -45,13 +55,13 @@ app.get('/api/vehicles', async (req, res) => {
       spec: {
         itemsType: 'avl_unit',
         propName: 'sys_name',
-        propValueMask: '*',
+        propValueMask: searchMask,
         sortType: 'sys_name'
       },
       force: 1,
-      flags: 1025,
-      from: 0,
-      to: 0
+      flags: 1025, // 1: base unit info, 1024: last known position
+      from: from,
+      to: to
     };
 
     let result = await axios.get(WIALON_URL, {
@@ -62,6 +72,7 @@ app.get('/api/vehicles', async (req, res) => {
       }
     });
 
+    // Refresh session if expired (Error code 1)
     if (result.data.error === 1) {
       sessionId = null;
       eid = await getSession();
@@ -78,6 +89,7 @@ app.get('/api/vehicles', async (req, res) => {
       return res.status(400).json({ error: `Wialon error code: ${result.data.error}` });
     }
 
+    // Map clean vehicle attributes
     const vehicles = (result.data.items || []).map((unit) => ({
       unitId: unit.id,
       unitName: unit.nm,
@@ -90,7 +102,9 @@ app.get('/api/vehicles', async (req, res) => {
 
     res.json({
       status: 'success',
-      count: vehicles.length,
+      totalMatches: result.data.totalItemsCount || vehicles.length,
+      returnedCount: vehicles.length,
+      page: limit > 0 ? page : 1,
       data: vehicles
     });
   } catch (err) {
