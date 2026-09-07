@@ -47,7 +47,22 @@ function parseDurationToHours(timeStr) {
   return +(hours + minutes / 60 + seconds / 3600).toFixed(2);
 }
 
-// Health check
+// Extract vehicle name safely from row header or columns
+function extractVehicleName(row, cols) {
+  if (row.t && typeof row.t === 'string' && row.t.trim() !== '') {
+    return row.t.trim();
+  }
+  // Check first few columns for a valid text name
+  for (let i = 0; i < Math.min(cols.length, 3); i++) {
+    const val = String(cols[i] || '').trim();
+    // Skip plain numeric index columns (e.g. "1", "2") and pure dates
+    if (val && !/^\d+$/.test(val) && !/^\d{4}-\d{2}-\d{2}/.test(val)) {
+      return val;
+    }
+  }
+  return 'Unknown Vehicle';
+}
+
 app.get('/', (req, res) => {
   res.json({ status: 'running', message: 'Wialon Proxy Service is Online' });
 });
@@ -59,15 +74,21 @@ app.get('/api/vehicles', async (req, res) => {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
   }
 
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 0;
+  const searchMask = req.query.search ? `*${req.query.search}*` : '*';
+  const from = limit > 0 ? (page - 1) * limit : 0;
+  const to = limit > 0 ? from + limit - 1 : 0;
+
   try {
     let eid = await getSession();
 
     const searchParams = {
-      spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: '*', sortType: 'sys_name' },
+      spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: searchMask, sortType: 'sys_name' },
       force: 1,
       flags: 1025,
-      from: 0,
-      to: 0
+      from,
+      to
     };
 
     let result = await axios.get(WIALON_URL, {
@@ -92,32 +113,38 @@ app.get('/api/vehicles', async (req, res) => {
       lastSeen: unit.pos ? new Date(unit.pos.t * 1000).toISOString() : null
     }));
 
-    res.json({ status: 'success', count: vehicles.length, data: vehicles });
+    res.json({
+      status: 'success',
+      totalMatches: result.data.totalItemsCount || vehicles.length,
+      returnedCount: vehicles.length,
+      page: limit > 0 ? page : 1,
+      data: vehicles
+    });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
 
-// 2. Automated Clean Report Generator
+// 2. Unit Group Report Endpoint with Vehicle Names
 app.get('/api/reports/summary', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
   }
 
-  // Use your discovered defaults if not passed in query
-  const resourceId = parseInt(req.query.resourceId) || 30326456;
-  const templateId = parseInt(req.query.templateId) || 2;
-  const objectId = parseInt(req.query.objectId) || 30185490;
+  // Your verified IDs
+  const resourceId = parseInt(req.query.resourceId) || 28310909;
+  const templateId = parseInt(req.query.templateId) || 9;
+  const objectId = parseInt(req.query.objectId) || 28378146;
 
-  // Default to today's timestamps if not provided
+  // Interval defaults
   const from = parseInt(req.query.from) || 1788719400;
   const to = parseInt(req.query.to) || 1788805799;
 
   try {
     let eid = await getSession();
 
-    // 1. Run the report on Wialon
+    // 1. Run the report
     const execParams = {
       reportResourceId: resourceId,
       reportTemplateId: templateId,
@@ -127,7 +154,9 @@ app.get('/api/reports/summary', async (req, res) => {
         from: from,
         to: to,
         flags: 16777216
-      }
+      },
+      remoteExec: 1,
+      reportObjectIdList: []
     };
 
     let execRes = await axios.get(WIALON_URL, {
@@ -146,12 +175,18 @@ app.get('/api/reports/summary', async (req, res) => {
       return res.status(400).json({ error: `Wialon exec_report error: ${execRes.data.error}` });
     }
 
-    // 2. Extract rows from table index 0
+    // 2. Get table headers to read column labels
+    const tablesRes = await axios.get(WIALON_URL, {
+      params: { svc: 'report/get_report_tables', params: '{}', sid: eid }
+    });
+    const headers = tablesRes.data?.[0]?.header || [];
+
+    // 3. Extract rows from table index 0
     const rowParams = {
       tableIndex: 0,
       config: {
         type: 'range',
-        data: { from: 0, to: 500, level: 0 }
+        data: { from: 0, to: 1000, level: 0 }
       }
     };
 
@@ -159,39 +194,41 @@ app.get('/api/reports/summary', async (req, res) => {
       params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
     });
 
-    // 3. Clear report cache from Wialon server
+    // 4. Free Wialon server memory
     await axios.get(WIALON_URL, {
       params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
     });
 
     const rawRows = rowsRes.data || [];
 
-    // 4. Sanitize columns into clean numbers
-    const cleanReport = rawRows.map((row, idx) => {
-      const cols = row.c || [];
+    // 5. Structure each row with vehicle name and clean fields
+    const vehiclesData = rawRows.map((row, idx) => {
+      const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
+      const vehicleName = extractVehicleName(row, cols);
+
       return {
         index: idx + 1,
-        rowLabel: typeof cols[0] === 'object' ? cols[0].t : cols[0],
-        distanceKm: parseMetric(cols[1]),
-        engineHoursFormatted: typeof cols[2] === 'object' ? cols[2].t : (cols[2] || '0:00:00'),
-        engineHoursDecimal: parseDurationToHours(cols[2]),
-        fuelConsumedLiters: parseMetric(cols[3]),
-        fuelOpeningLiters: parseMetric(cols[4]),
-        fuelClosingLiters: parseMetric(cols[5]),
-        rawColumns: cols.map(c => (typeof c === 'object' ? c.t : c))
+        vehicleName: vehicleName,
+        columns: cols
       };
     });
 
     res.json({
       status: 'success',
+      reportMeta: {
+        resourceId,
+        templateId,
+        groupId: objectId,
+        tableHeaders: headers
+      },
       period: {
         fromTimestamp: from,
         toTimestamp: to,
         fromDate: new Date(from * 1000).toISOString(),
         toDate: new Date(to * 1000).toISOString()
       },
-      totalRows: cleanReport.length,
-      report: cleanReport
+      totalVehicles: vehiclesData.length,
+      data: vehiclesData
     });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
