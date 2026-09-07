@@ -163,25 +163,7 @@ app.get('/api/reports/summary', async (req, res) => {
       params: { svc: 'report/exec_report', params: JSON.stringify(execParams), sid: eid }
     });
 
-    if (execRes.data.error === 1) {
-      sessionId = null;
-      eid = await getSession();
-      execRes = await axios.get(WIALON_URL, {
-        params: { svc: 'report/exec_report', params: JSON.stringify(execParams), sid: eid }
-      });
-    }
-
-    if (execRes.data.error) {
-      return res.status(400).json({ error: `Wialon exec_report error: ${execRes.data.error}` });
-    }
-
-    // 2. Get table headers to read column labels
-    const tablesRes = await axios.get(WIALON_URL, {
-      params: { svc: 'report/get_report_tables', params: '{}', sid: eid }
-    });
-    const headers = tablesRes.data?.[0]?.header || [];
-
-    // 3. Extract rows from table index 0
+   // 3. Extract rows safely from table index 0
     const rowParams = {
       tableIndex: 0,
       config: {
@@ -199,10 +181,32 @@ app.get('/api/reports/summary', async (req, res) => {
       params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
     });
 
-    const rawRows = rowsRes.data || [];
+    // Handle both array responses and object responses ({ rows: [...] })
+    let rawRows = [];
+    if (Array.isArray(rowsRes.data)) {
+      rawRows = rowsRes.data;
+    } else if (rowsRes.data && Array.isArray(rowsRes.data.rows)) {
+      rawRows = rowsRes.data.rows;
+    } else if (rowsRes.data && typeof rowsRes.data === 'object') {
+      // If Wialon returned an error code or unexpected object
+      if (rowsRes.data.error) {
+        return res.status(400).json({ error: `Wialon select_result_rows error code: ${rowsRes.data.error}` });
+      }
+      // If it returned key-indexed rows
+      rawRows = Object.values(rowsRes.data).filter(item => item && typeof item === 'object' && ('c' in item || 't' in item));
+    }
 
     // 5. Structure each row with vehicle name and clean fields
     const vehiclesData = rawRows.map((row, idx) => {
+      const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
+      const vehicleName = extractVehicleName(row, cols);
+
+      return {
+        index: idx + 1,
+        vehicleName: vehicleName,
+        columns: cols
+      };
+    });
       const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
       const vehicleName = extractVehicleName(row, cols);
 
