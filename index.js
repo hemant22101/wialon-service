@@ -1,10 +1,10 @@
-@'
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+// Render assigns its own port dynamically via process.env.PORT (defaults to 10000)
+const PORT = process.env.PORT || 10000;
 const WIALON_URL = process.env.WIALON_HOST || 'https://hst-api.wialon.com/wialon/ajax.html';
 const TOKEN = process.env.WIALON_TOKEN;
 const CLIENT_API_KEY = process.env.CLIENT_API_KEY || 'my_secret_client_key_123';
@@ -26,9 +26,12 @@ async function getSession() {
   return sessionId;
 }
 
-// Endpoint with API key validation
+// Health-check root route so Render port scanner finds it immediately
+app.get('/', (req, res) => {
+  res.json({ status: 'running', message: 'Wialon Proxy Service is Online' });
+});
+
 app.get('/api/vehicles', async (req, res) => {
-  // Check authorization header or query param
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
@@ -84,7 +87,7 @@ app.get('/api/vehicles', async (req, res) => {
   }
 });
 
+// Explicitly bind to 0.0.0.0
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
-'@ | Out-File -FilePath index.js -Encoding utf8
