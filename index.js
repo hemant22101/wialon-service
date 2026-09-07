@@ -30,44 +30,11 @@ async function getSession() {
   return sessionId;
 }
 
-function parseMetric(val) {
-  if (!val) return 0;
-  const raw = typeof val === 'object' ? val.t : val;
-  const cleaned = String(raw).replace(/[^\d.-]/g, '');
-  return parseFloat(cleaned) || 0;
-}
-
-function parseDurationToHours(timeStr) {
-  const raw = typeof timeStr === 'object' ? timeStr.t : timeStr;
-  if (!raw || !String(raw).includes(':')) return 0;
-  const parts = String(raw).split(':').map(Number);
-  const hours = parts[0] || 0;
-  const minutes = parts[1] || 0;
-  const seconds = parts[2] || 0;
-  return +(hours + minutes / 60 + seconds / 3600).toFixed(2);
-}
-
-// Extract vehicle name safely from row header or columns
-function extractVehicleName(row, cols) {
-  if (row.t && typeof row.t === 'string' && row.t.trim() !== '') {
-    return row.t.trim();
-  }
-  // Check first few columns for a valid text name
-  for (let i = 0; i < Math.min(cols.length, 3); i++) {
-    const val = String(cols[i] || '').trim();
-    // Skip plain numeric index columns (e.g. "1", "2") and pure dates
-    if (val && !/^\d+$/.test(val) && !/^\d{4}-\d{2}-\d{2}/.test(val)) {
-      return val;
-    }
-  }
-  return 'Unknown Vehicle';
-}
-
 app.get('/', (req, res) => {
   res.json({ status: 'running', message: 'Wialon Proxy Service is Online' });
 });
 
-// 1. Live Vehicles
+// 1. Live Vehicles Endpoint
 app.get('/api/vehicles', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
@@ -125,19 +92,17 @@ app.get('/api/vehicles', async (req, res) => {
   }
 });
 
-// 2. Unit Group Report Endpoint with Vehicle Names
+// 2. Report Summary Endpoint (Debug & Inspection Mode)
 app.get('/api/reports/summary', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
   }
 
-  // Your verified IDs
   const resourceId = parseInt(req.query.resourceId) || 28310909;
   const templateId = parseInt(req.query.templateId) || 9;
   const objectId = parseInt(req.query.objectId) || 28378146;
 
-  // Interval defaults
   const from = parseInt(req.query.from) || 1788719400;
   const to = parseInt(req.query.to) || 1788805799;
 
@@ -163,7 +128,30 @@ app.get('/api/reports/summary', async (req, res) => {
       params: { svc: 'report/exec_report', params: JSON.stringify(execParams), sid: eid }
     });
 
- // 3. Extract rows from table index 0
+    if (execRes.data.error === 1) {
+      sessionId = null;
+      eid = await getSession();
+      execRes = await axios.get(WIALON_URL, {
+        params: { svc: 'report/exec_report', params: JSON.stringify(execParams), sid: eid }
+      });
+    }
+
+    if (execRes.data.error) {
+      return res.status(400).json({ error: `Wialon exec_report error: ${execRes.data.error}` });
+    }
+
+    // 2. Read table headers
+    let headers = [];
+    try {
+      const tablesRes = await axios.get(WIALON_URL, {
+        params: { svc: 'report/get_report_tables', params: '{}', sid: eid }
+      });
+      headers = tablesRes.data?.[0]?.header || [];
+    } catch (e) {
+      // Non-blocking fallback if headers fail
+    }
+
+    // 3. Extract table rows
     const rowParams = {
       tableIndex: 0,
       config: {
@@ -181,70 +169,11 @@ app.get('/api/reports/summary', async (req, res) => {
       params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
     });
 
-    // Return the direct raw data response to inspect its exact shape
-    return res.json({
+    // Inspect the exact structure returned by Wialon
+    res.json({
       status: 'debug',
       tableHeaders: headers,
       rawRowsResponse: rowsRes.data
-    });
-
-    // 4. Free Wialon server memory
-    await axios.get(WIALON_URL, {
-      params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
-    });
-
-    // Handle both array responses and object responses ({ rows: [...] })
-    let rawRows = [];
-    if (Array.isArray(rowsRes.data)) {
-      rawRows = rowsRes.data;
-    } else if (rowsRes.data && Array.isArray(rowsRes.data.rows)) {
-      rawRows = rowsRes.data.rows;
-    } else if (rowsRes.data && typeof rowsRes.data === 'object') {
-      // If Wialon returned an error code or unexpected object
-      if (rowsRes.data.error) {
-        return res.status(400).json({ error: `Wialon select_result_rows error code: ${rowsRes.data.error}` });
-      }
-      // If it returned key-indexed rows
-      rawRows = Object.values(rowsRes.data).filter(item => item && typeof item === 'object' && ('c' in item || 't' in item));
-    }
-
-    // 5. Structure each row with vehicle name and clean fields
-    const vehiclesData = rawRows.map((row, idx) => {
-      const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
-      const vehicleName = extractVehicleName(row, cols);
-
-      return {
-        index: idx + 1,
-        vehicleName: vehicleName,
-        columns: cols
-      };
-    });
-      const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
-      const vehicleName = extractVehicleName(row, cols);
-
-      return {
-        index: idx + 1,
-        vehicleName: vehicleName,
-        columns: cols
-      };
-    });
-
-    res.json({
-      status: 'success',
-      reportMeta: {
-        resourceId,
-        templateId,
-        groupId: objectId,
-        tableHeaders: headers
-      },
-      period: {
-        fromTimestamp: from,
-        toTimestamp: to,
-        fromDate: new Date(from * 1000).toISOString(),
-        toDate: new Date(to * 1000).toISOString()
-      },
-      totalVehicles: vehiclesData.length,
-      data: vehiclesData
     });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
