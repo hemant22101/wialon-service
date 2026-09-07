@@ -163,17 +163,29 @@ app.get('/api/reports/summary', async (req, res) => {
       params: { svc: 'report/exec_report', params: JSON.stringify(execParams), sid: eid }
     });
 
-   // 3. Extract rows safely from table index 0
+ // 3. Extract rows from table index 0
     const rowParams = {
       tableIndex: 0,
       config: {
         type: 'range',
-        data: { from: 0, to: 1000, level: 0 }
+        data: { from: 0, to: 50, level: 0 }
       }
     };
 
     const rowsRes = await axios.get(WIALON_URL, {
       params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
+    });
+
+    // 4. Free Wialon server memory
+    await axios.get(WIALON_URL, {
+      params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
+    });
+
+    // Return the direct raw data response to inspect its exact shape
+    return res.json({
+      status: 'debug',
+      tableHeaders: headers,
+      rawRowsResponse: rowsRes.data
     });
 
     // 4. Free Wialon server memory
