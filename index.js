@@ -139,24 +139,53 @@ app.get('/api/reports/summary', async (req, res) => {
     if (execRes.data.error) {
       return res.status(400).json({ error: `Wialon exec_report error: ${execRes.data.error}` });
     }
+// 1. Run the report synchronously
+    const execParams = {
+      reportResourceId: resourceId,
+      reportTemplateId: templateId,
+      reportObjectId: objectId,
+      reportObjectSecId: 0,
+      interval: {
+        from: from,
+        to: to,
+        flags: 16777216
+      }
+    };
 
-    // 2. Read table headers
-    let headers = [];
-    try {
-      const tablesRes = await axios.get(WIALON_URL, {
-        params: { svc: 'report/get_report_tables', params: '{}', sid: eid }
+    let execRes = await axios.get(WIALON_URL, {
+      params: { svc: 'report/exec_report', params: JSON.stringify(execParams), sid: eid }
+    });
+
+    if (execRes.data.error === 1) {
+      sessionId = null;
+      eid = await getSession();
+      execRes = await axios.get(WIALON_URL, {
+        params: { svc: 'report/exec_report', params: JSON.stringify(execParams), sid: eid }
       });
-      headers = tablesRes.data?.[0]?.header || [];
-    } catch (e) {
-      // Non-blocking fallback if headers fail
     }
 
-    // 3. Extract table rows
+    if (execRes.data.error) {
+      return res.status(400).json({ error: `Wialon exec_report error: ${execRes.data.error}` });
+    }
+
+    // Inspect what tables Wialon actually generated
+    const reportTables = execRes.data.reportResult?.tables || [];
+    if (reportTables.length === 0) {
+      // Free server memory
+      await axios.get(WIALON_URL, { params: { svc: 'report/cleanup_result', params: '{}', sid: eid } });
+      return res.json({
+        status: 'empty',
+        message: 'Report executed successfully but generated no tables for this time interval/group.',
+        reportResult: execRes.data
+      });
+    }
+
+    // 2. Extract rows from the first active table
     const rowParams = {
       tableIndex: 0,
       config: {
         type: 'range',
-        data: { from: 0, to: 50, level: 0 }
+        data: { from: 0, to: 100, level: 0 }
       }
     };
 
@@ -164,20 +193,17 @@ app.get('/api/reports/summary', async (req, res) => {
       params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
     });
 
-    // 4. Free Wialon server memory
+    // 3. Free Wialon server memory
     await axios.get(WIALON_URL, {
       params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
     });
 
-    // Inspect the exact structure returned by Wialon
-    res.json({
+    return res.json({
       status: 'debug',
-      tableHeaders: headers,
+      tableCount: reportTables.length,
+      tablesMetadata: reportTables,
       rawRowsResponse: rowsRes.data
     });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
 });
 
 app.listen(PORT, '0.0.0.0', () => {
