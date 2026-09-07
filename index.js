@@ -3,10 +3,9 @@ const express = require('express');
 const axios = require('axios');
 
 const app = express();
-// Render assigns its own port dynamically via process.env.PORT (defaults to 10000)
 const PORT = process.env.PORT || 10000;
-const WIALON_URL = process.env.WIALON_HOST || 'https://hst-api.wialon.com/wialon/ajax.html';
-const TOKEN = process.env.WIALON_TOKEN;
+const WIALON_URL = 'https://hst-api.wialon.com/wialon/ajax.html';
+const TOKEN = process.env.WIALON_TOKEN || '0f2f81f1b6be4d0fecfad332f8b1e70aD8816EA7AFCB7791C22A44BFA7F56AB50DA0634F';
 const CLIENT_API_KEY = process.env.CLIENT_API_KEY || 'my_secret_client_key_123';
 
 let sessionId = null;
@@ -14,10 +13,13 @@ let sessionId = null;
 async function getSession() {
   if (sessionId) return sessionId;
 
-  const loginParams = JSON.stringify({ token: TOKEN });
-  const url = `${WIALON_URL}?svc=token/login&params=${encodeURIComponent(loginParams)}`;
+  const response = await axios.get(WIALON_URL, {
+    params: {
+      svc: 'token/login',
+      params: JSON.stringify({ token: TOKEN })
+    }
+  });
 
-  const response = await axios.get(url);
   if (response.data.error) {
     throw new Error(`Wialon login failed. Error code: ${response.data.error}`);
   }
@@ -26,7 +28,6 @@ async function getSession() {
   return sessionId;
 }
 
-// Health-check root route so Render port scanner finds it immediately
 app.get('/', (req, res) => {
   res.json({ status: 'running', message: 'Wialon Proxy Service is Online' });
 });
@@ -40,7 +41,7 @@ app.get('/api/vehicles', async (req, res) => {
   try {
     let eid = await getSession();
 
-    const searchParams = JSON.stringify({
+    const searchParams = {
       spec: {
         itemsType: 'avl_unit',
         propName: 'sys_name',
@@ -51,16 +52,26 @@ app.get('/api/vehicles', async (req, res) => {
       flags: 1025,
       from: 0,
       to: 0
-    });
+    };
 
-    let queryUrl = `${WIALON_URL}?svc=core/search_items&params=${encodeURIComponent(searchParams)}&sid=${eid}`;
-    let result = await axios.get(queryUrl);
+    let result = await axios.get(WIALON_URL, {
+      params: {
+        svc: 'core/search_items',
+        params: JSON.stringify(searchParams),
+        sid: eid
+      }
+    });
 
     if (result.data.error === 1) {
       sessionId = null;
       eid = await getSession();
-      queryUrl = `${WIALON_URL}?svc=core/search_items&params=${encodeURIComponent(searchParams)}&sid=${eid}`;
-      result = await axios.get(queryUrl);
+      result = await axios.get(WIALON_URL, {
+        params: {
+          svc: 'core/search_items',
+          params: JSON.stringify(searchParams),
+          sid: eid
+        }
+      });
     }
 
     if (result.data.error) {
@@ -87,7 +98,6 @@ app.get('/api/vehicles', async (req, res) => {
   }
 });
 
-// Explicitly bind to 0.0.0.0
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
