@@ -30,11 +30,29 @@ async function getSession() {
   return sessionId;
 }
 
+// Sanitization utilities
+function parseMetric(val) {
+  if (!val) return 0;
+  const raw = typeof val === 'object' ? val.t : val;
+  const cleaned = String(raw).replace(/[^\d.-]/g, '');
+  return parseFloat(cleaned) || 0;
+}
+
+function parseDurationToHours(timeStr) {
+  const raw = typeof timeStr === 'object' ? timeStr.t : timeStr;
+  if (!raw || !String(raw).includes(':')) return 0;
+  const parts = String(raw).split(':').map(Number);
+  const hours = parts[0] || 0;
+  const minutes = parts[1] || 0;
+  const seconds = parts[2] || 0;
+  return +(hours + minutes / 60 + seconds / 3600).toFixed(2);
+}
+
 app.get('/', (req, res) => {
   res.json({ status: 'running', message: 'Wialon Proxy Service is Online' });
 });
 
-// 1. Live Vehicles Endpoint
+// 1. Real-time Live Fleet Status
 app.get('/api/vehicles', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
@@ -92,24 +110,26 @@ app.get('/api/vehicles', async (req, res) => {
   }
 });
 
-// 2. Report Summary Endpoint (Direct Inspection)
+// 2. Production Clean Fleet Summary Report
 app.get('/api/reports/summary', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
   }
 
+  // Pre-configured working defaults
   const resourceId = parseInt(req.query.resourceId) || 28310909;
   const templateId = parseInt(req.query.templateId) || 9;
   const objectId = parseInt(req.query.objectId) || 28378146;
 
-  const from = parseInt(req.query.from) || 1788719400;
-  const to = parseInt(req.query.to) || 1788805799;
+  const now = Math.floor(Date.now() / 1000);
+  const from = parseInt(req.query.from) || 1788719400; // or: (now - 86400)
+  const to = parseInt(req.query.to) || 1788805799;     // or: now
 
   try {
     let eid = await getSession();
 
-    // 1. Run the report directly
+    // Execute report
     const execParams = {
       reportResourceId: resourceId,
       reportTemplateId: templateId,
@@ -143,17 +163,17 @@ app.get('/api/reports/summary', async (req, res) => {
       await axios.get(WIALON_URL, { params: { svc: 'report/cleanup_result', params: '{}', sid: eid } });
       return res.json({
         status: 'empty',
-        message: 'Report generated no tables for this interval.',
-        reportResult: execRes.data
+        message: 'No report data found for this interval.',
+        data: []
       });
     }
 
-    // 2. Select rows from table index 0
+    // Pull report rows
     const rowParams = {
       tableIndex: 0,
       config: {
         type: 'range',
-        data: { from: 0, to: 100, level: 0 }
+        data: { from: 0, to: 500, level: 0 }
       }
     };
 
@@ -161,16 +181,40 @@ app.get('/api/reports/summary', async (req, res) => {
       params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
     });
 
-    // 3. Cleanup report memory
+    // Cleanup report from Wialon server memory
     await axios.get(WIALON_URL, {
       params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
     });
 
+    const rawRows = Array.isArray(rowsRes.data) ? rowsRes.data : [];
+
+    // Map each row to clean typed metrics
+    const cleanVehicles = rawRows.map((row, idx) => {
+      const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
+      return {
+        index: idx + 1,
+        vehicleName: cols[1] || 'Unknown Vehicle',
+        distanceKm: parseMetric(cols[2]),
+        engineHoursFormatted: cols[3] || '0:00:00',
+        engineHoursDecimal: parseDurationToHours(cols[3]),
+        fuelConsumedLiters: parseMetric(cols[4]),
+        fuelOpeningLiters: parseMetric(cols[5]),
+        fuelClosingLiters: parseMetric(cols[6]),
+        refuelingLiters: parseMetric(cols[7]),
+        drainedLiters: parseMetric(cols[8])
+      };
+    });
+
     res.json({
-      status: 'debug',
-      tableCount: reportTables.length,
-      tablesMetadata: reportTables,
-      rawRowsResponse: rowsRes.data
+      status: 'success',
+      period: {
+        fromTimestamp: from,
+        toTimestamp: to,
+        fromDate: new Date(from * 1000).toISOString(),
+        toDate: new Date(to * 1000).toISOString()
+      },
+      totalVehicles: cleanVehicles.length,
+      data: cleanVehicles
     });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
