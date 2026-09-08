@@ -30,7 +30,6 @@ async function getSession() {
   return sessionId;
 }
 
-// Sanitization utilities
 function parseMetric(val) {
   if (!val) return 0;
   const raw = typeof val === 'object' ? val.t : val;
@@ -52,7 +51,7 @@ app.get('/', (req, res) => {
   res.json({ status: 'running', message: 'Wialon Proxy Service is Online' });
 });
 
-// 1. Real-time Live Fleet Status
+// 1. Live Vehicles
 app.get('/api/vehicles', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
@@ -110,26 +109,24 @@ app.get('/api/vehicles', async (req, res) => {
   }
 });
 
-// 2. Production Clean Fleet Summary Report
+// 2. Report Endpoint for Template 6 & Group 29062778
 app.get('/api/reports/summary', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
   }
 
-  // Pre-configured working defaults
   const resourceId = parseInt(req.query.resourceId) || 28310909;
-  const templateId = parseInt(req.query.templateId) || 9;
-  const objectId = parseInt(req.query.objectId) || 28378146;
+  const templateId = parseInt(req.query.templateId) || 6;
+  const objectId = parseInt(req.query.objectId) || 29062778;
 
-  const now = Math.floor(Date.now() / 1000);
-  const from = parseInt(req.query.from) || 1788719400; // or: (now - 86400)
-  const to = parseInt(req.query.to) || 1788805799;     // or: now
+  const from = parseInt(req.query.from) || 1788546600;
+  const to = parseInt(req.query.to) || 1788892199;
 
   try {
     let eid = await getSession();
 
-    // Execute report
+    // 1. Execute report
     const execParams = {
       reportResourceId: resourceId,
       reportTemplateId: templateId,
@@ -163,17 +160,17 @@ app.get('/api/reports/summary', async (req, res) => {
       await axios.get(WIALON_URL, { params: { svc: 'report/cleanup_result', params: '{}', sid: eid } });
       return res.json({
         status: 'empty',
-        message: 'No report data found for this interval.',
+        message: 'No report data found for this interval/group.',
         data: []
       });
     }
 
-    // Pull report rows
+    // 2. Select rows from table 0 (up to 1,000 rows)
     const rowParams = {
       tableIndex: 0,
       config: {
         type: 'range',
-        data: { from: 0, to: 500, level: 0 }
+        data: { from: 0, to: 1000, level: 0 }
       }
     };
 
@@ -181,40 +178,40 @@ app.get('/api/reports/summary', async (req, res) => {
       params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
     });
 
-    // Cleanup report from Wialon server memory
+    // 3. Clear report from memory
     await axios.get(WIALON_URL, {
       params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
     });
 
     const rawRows = Array.isArray(rowsRes.data) ? rowsRes.data : [];
+    const tableHeader = reportTables[0]?.header || [];
 
-    // Map each row to clean typed metrics
-    const cleanVehicles = rawRows.map((row, idx) => {
+    // Return structured rows alongside raw data to verify column alignment
+    const resultRows = rawRows.map((row, idx) => {
       const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
       return {
         index: idx + 1,
-        vehicleName: cols[1] || 'Unknown Vehicle',
-        distanceKm: parseMetric(cols[2]),
-        engineHoursFormatted: cols[3] || '0:00:00',
-        engineHoursDecimal: parseDurationToHours(cols[3]),
-        fuelConsumedLiters: parseMetric(cols[4]),
-        fuelOpeningLiters: parseMetric(cols[5]),
-        fuelClosingLiters: parseMetric(cols[6]),
-        refuelingLiters: parseMetric(cols[7]),
-        drainedLiters: parseMetric(cols[8])
+        vehicleName: row.t || cols[1] || cols[0],
+        rawColumns: cols
       };
     });
 
     res.json({
       status: 'success',
+      reportMeta: {
+        resourceId,
+        templateId,
+        objectId,
+        headers: tableHeader
+      },
       period: {
         fromTimestamp: from,
         toTimestamp: to,
         fromDate: new Date(from * 1000).toISOString(),
         toDate: new Date(to * 1000).toISOString()
       },
-      totalVehicles: cleanVehicles.length,
-      data: cleanVehicles
+      totalCount: resultRows.length,
+      data: resultRows
     });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
