@@ -182,19 +182,41 @@ app.get('/api/reports/summary', async (req, res) => {
     await axios.get(WIALON_URL, {
       params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
     });
+// 2. Select rows from table 0 at level 1 to get individual vehicles
+    const rowParams = {
+      tableIndex: 0,
+      config: {
+        type: 'range',
+        data: { from: 0, to: 1000, level: 1 }
+      }
+    };
+
+    const rowsRes = await axios.get(WIALON_URL, {
+      params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
+    });
+
+    // 3. Clear report from memory
+    await axios.get(WIALON_URL, {
+      params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
+    });
 
     const rawRows = Array.isArray(rowsRes.data) ? rowsRes.data : [];
-    const tableHeader = reportTables[0]?.header || [];
 
-    // Return structured rows alongside raw data to verify column alignment
-    const resultRows = rawRows.map((row, idx) => {
-      const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
-      return {
-        index: idx + 1,
-        vehicleName: row.t || cols[1] || cols[0],
-        rawColumns: cols
-      };
-    });
+    // Filter out the summary "Total" line and map each vehicle's location
+    const cleanVehicles = rawRows
+      .filter(row => {
+        const name = row.t || (row.c && row.c[1]);
+        return name && name !== 'Total';
+      })
+      .map((row, idx) => {
+        const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
+        return {
+          index: idx + 1,
+          vehicleName: row.t || cols[1] || 'Unknown Unit',
+          lastMessageTime: cols[2] || null,
+          location: cols[3] || 'Location not available'
+        };
+      });
 
     res.json({
       status: 'success',
@@ -202,7 +224,7 @@ app.get('/api/reports/summary', async (req, res) => {
         resourceId,
         templateId,
         objectId,
-        headers: tableHeader
+        reportType: 'Location & Last Seen'
       },
       period: {
         fromTimestamp: from,
@@ -210,14 +232,6 @@ app.get('/api/reports/summary', async (req, res) => {
         fromDate: new Date(from * 1000).toISOString(),
         toDate: new Date(to * 1000).toISOString()
       },
-      totalCount: resultRows.length,
-      data: resultRows
+      totalVehicles: cleanVehicles.length,
+      data: cleanVehicles
     });
-  } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-});
