@@ -51,7 +51,7 @@ app.get('/', (req, res) => {
   res.json({ status: 'running', message: 'Wialon Proxy Service is Online' });
 });
 
-// 1. Live Vehicles
+// 1. Live Vehicles Endpoint
 app.get('/api/vehicles', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
@@ -109,7 +109,7 @@ app.get('/api/vehicles', async (req, res) => {
   }
 });
 
-// 2. Report Endpoint for Template 6 & Group 29062778
+// 2. Report Summary Endpoint (Handles both Level 0 Summary and Level 1 Breakdown)
 app.get('/api/reports/summary', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
@@ -126,7 +126,6 @@ app.get('/api/reports/summary', async (req, res) => {
   try {
     let eid = await getSession();
 
-    // 1. Execute report
     const execParams = {
       reportResourceId: resourceId,
       reportTemplateId: templateId,
@@ -160,29 +159,12 @@ app.get('/api/reports/summary', async (req, res) => {
       await axios.get(WIALON_URL, { params: { svc: 'report/cleanup_result', params: '{}', sid: eid } });
       return res.json({
         status: 'empty',
-        message: 'No report data found for this interval/group.',
+        message: 'No report data found for this interval.',
         data: []
       });
     }
 
-    // 2. Select rows from table 0 (up to 1,000 rows)
-    const rowParams = {
-      tableIndex: 0,
-      config: {
-        type: 'range',
-        data: { from: 0, to: 1000, level: 0 }
-      }
-    };
-
-    const rowsRes = await axios.get(WIALON_URL, {
-      params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
-    });
-
-    // 3. Clear report from memory
-    await axios.get(WIALON_URL, {
-      params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
-    });
-// 2. Select rows from table 0 at level 1 to get individual vehicles
+    // Pull rows at level 1 to get sub-vehicles (or fallback to level 0)
     const rowParams = {
       tableIndex: 0,
       config: {
@@ -191,30 +173,29 @@ app.get('/api/reports/summary', async (req, res) => {
       }
     };
 
-    const rowsRes = await axios.get(WIALON_URL, {
+    let rowsRes = await axios.get(WIALON_URL, {
       params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
     });
 
-    // 3. Clear report from memory
+    // Cleanup report from Wialon server memory
     await axios.get(WIALON_URL, {
       params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
     });
 
-    const rawRows = Array.isArray(rowsRes.data) ? rowsRes.data : [];
+    let rawRows = Array.isArray(rowsRes.data) ? rowsRes.data : [];
 
-    // Filter out the summary "Total" line and map each vehicle's location
+    // Filter out total rows if present
     const cleanVehicles = rawRows
-      .filter(row => {
+      .filter((row) => {
         const name = row.t || (row.c && row.c[1]);
         return name && name !== 'Total';
       })
       .map((row, idx) => {
-        const cols = (row.c || []).map(c => (typeof c === 'object' ? c.t : c));
+        const cols = (row.c || []).map((c) => (typeof c === 'object' ? c.t : c));
         return {
           index: idx + 1,
           vehicleName: row.t || cols[1] || 'Unknown Unit',
-          lastMessageTime: cols[2] || null,
-          location: cols[3] || 'Location not available'
+          columns: cols
         };
       });
 
@@ -224,7 +205,7 @@ app.get('/api/reports/summary', async (req, res) => {
         resourceId,
         templateId,
         objectId,
-        reportType: 'Location & Last Seen'
+        headers: reportTables[0]?.header || []
       },
       period: {
         fromTimestamp: from,
@@ -235,3 +216,11 @@ app.get('/api/reports/summary', async (req, res) => {
       totalVehicles: cleanVehicles.length,
       data: cleanVehicles
     });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on port ${PORT}`);
+});
