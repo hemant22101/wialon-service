@@ -109,23 +109,25 @@ app.get('/api/vehicles', async (req, res) => {
   }
 });
 
-// 2. Report Summary Endpoint (Handles both Level 0 Summary and Level 1 Breakdown)
+// 2. Report Summary Endpoint (Universal for all templates)
 app.get('/api/reports/summary', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
   }
 
+  // Fallback defaults: Resource 28310909, Template 9 (Fuel Summary), Group 28378146
   const resourceId = parseInt(req.query.resourceId) || 28310909;
-  const templateId = parseInt(req.query.templateId) || 6;
-  const objectId = parseInt(req.query.objectId) || 29062778;
+  const templateId = parseInt(req.query.templateId) || 9;
+  const objectId = parseInt(req.query.objectId) || 28378146;
 
-  const from = parseInt(req.query.from) || 1788546600;
-  const to = parseInt(req.query.to) || 1788892199;
+  const from = parseInt(req.query.from) || 1788719400;
+  const to = parseInt(req.query.to) || 1788805799;
 
   try {
     let eid = await getSession();
 
+    // Step A: Run the report
     const execParams = {
       reportResourceId: resourceId,
       reportTemplateId: templateId,
@@ -159,9 +161,12 @@ app.get('/api/reports/summary', async (req, res) => {
       await axios.get(WIALON_URL, { params: { svc: 'report/cleanup_result', params: '{}', sid: eid } });
       return res.json({
         status: 'empty',
-        message: 'No report data found for this interval.',
+        message: 'No report data found for this interval/group.',
         data: []
-// 2. Fetch rows using raw range without restrictive level filtering
+      });
+    }
+
+    // Step B: Pull rows from table index 0
     const rowParams = {
       tableIndex: 0,
       config: {
@@ -170,26 +175,43 @@ app.get('/api/reports/summary', async (req, res) => {
       }
     };
 
-    let rowsRes = await axios.get(WIALON_URL, {
+    const rowsRes = await axios.get(WIALON_URL, {
       params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
     });
 
-    // Cleanup report from Wialon server memory
+    // Step C: Cleanup memory on Wialon
     await axios.get(WIALON_URL, {
       params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
     });
 
-    let rawRows = Array.isArray(rowsRes.data) ? rowsRes.data : [];
+    const rawRows = Array.isArray(rowsRes.data) ? rowsRes.data : [];
+    const headers = reportTables[0]?.header || [];
 
-    // Map rows cleanly
+    // Step D: Map cleanly whether it's Fuel (Template 9) or Tracking (Template 6)
     const cleanVehicles = rawRows.map((row, idx) => {
       const cols = (row.c || []).map((c) => (typeof c === 'object' ? c.t : c));
+
+      // If Template 9 (Fuel Report)
+      if (templateId === 9) {
+        return {
+          index: idx + 1,
+          vehicleName: cols[1] || 'Unknown Unit',
+          distanceKm: parseMetric(cols[2]),
+          engineHoursFormatted: cols[3] || '0:00:00',
+          engineHoursDecimal: parseDurationToHours(cols[3]),
+          fuelConsumedLiters: parseMetric(cols[4]),
+          fuelOpeningLiters: parseMetric(cols[5]),
+          fuelClosingLiters: parseMetric(cols[6]),
+          refuelingLiters: parseMetric(cols[7]),
+          drainedLiters: parseMetric(cols[8])
+        };
+      }
+
+      // If other templates (e.g. Template 6 Location / General)
       return {
         index: idx + 1,
         vehicleName: row.t || cols[1] || 'Unknown Unit',
-        lastMessageTime: cols[2] || null,
-        location: cols[3] || 'Location not available',
-        rawColumns: cols
+        columns: cols
       };
     });
 
@@ -199,24 +221,7 @@ app.get('/api/reports/summary', async (req, res) => {
         resourceId,
         templateId,
         objectId,
-        headers: reportTables[0]?.header || []
-      },
-      period: {
-        fromTimestamp: from,
-        toTimestamp: to,
-        fromDate: new Date(from * 1000).toISOString(),
-        toDate: new Date(to * 1000).toISOString()
-      },
-      totalVehicles: cleanVehicles.length,
-      data: cleanVehicles
-    });
-    res.json({
-      status: 'success',
-      reportMeta: {
-        resourceId,
-        templateId,
-        objectId,
-        headers: reportTables[0]?.header || []
+        headers
       },
       period: {
         fromTimestamp: from,
