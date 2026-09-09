@@ -7,8 +7,9 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 const WIALON_URL = 'https://hst-api.wialon.com/wialon/ajax.html';
+
 const TOKEN = process.env.WIALON_TOKEN;
-const CLIENT_API_KEY = process.env.CLIENT_API_KEY || 'my_secret_client_key_123';
+const CLIENT_API_KEY = process.env.CLIENT_API_KEY || 'fleet_report_key_2026';
 
 let sessionId = null;
 
@@ -23,46 +24,29 @@ async function getSession() {
   });
 
   if (response.data.error) {
-    throw new Error(`Wialon login failed. Error code: ${response.data.error}`);
+    throw new Error(`Wialon login failed with error code: ${response.data.error}`);
   }
 
   sessionId = response.data.eid;
   return sessionId;
 }
 
-function parseMetric(val) {
-  if (!val) return 0;
-  const raw = typeof val === 'object' ? val.t : val;
-  const cleaned = String(raw).replace(/[^\d.-]/g, '');
-  return parseFloat(cleaned) || 0;
-}
-
-function parseDurationToHours(timeStr) {
-  const raw = typeof timeStr === 'object' ? timeStr.t : timeStr;
-  if (!raw || !String(raw).includes(':')) return 0;
-  const parts = String(raw).split(':').map(Number);
-  const hours = parts[0] || 0;
-  const minutes = parts[1] || 0;
-  const seconds = parts[2] || 0;
-  return +(hours + minutes / 60 + seconds / 3600).toFixed(2);
-}
-
+// Health Check
 app.get('/', (req, res) => {
-  res.json({ status: 'running', message: 'Wialon Proxy Service is Online' });
+  res.json({
+    status: 'online',
+    service: 'Wialon Multi-Section Analytics API'
+  });
 });
 
-// 1. Live Vehicles Endpoint
+// Real-Time Fleet Tracking
 app.get('/api/vehicles', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
   }
 
-  const page = parseInt(req.query.page) || 1;
-  const limit = parseInt(req.query.limit) || 0;
   const searchMask = req.query.search ? `*${req.query.search}*` : '*';
-  const from = limit > 0 ? (page - 1) * limit : 0;
-  const to = limit > 0 ? from + limit - 1 : 0;
 
   try {
     let eid = await getSession();
@@ -71,8 +55,8 @@ app.get('/api/vehicles', async (req, res) => {
       spec: { itemsType: 'avl_unit', propName: 'sys_name', propValueMask: searchMask, sortType: 'sys_name' },
       force: 1,
       flags: 1025,
-      from,
-      to
+      from: 0,
+      to: 0
     };
 
     let result = await axios.get(WIALON_URL, {
@@ -99,9 +83,7 @@ app.get('/api/vehicles', async (req, res) => {
 
     res.json({
       status: 'success',
-      totalMatches: result.data.totalItemsCount || vehicles.length,
-      returnedCount: vehicles.length,
-      page: limit > 0 ? page : 1,
+      totalCount: vehicles.length,
       data: vehicles
     });
   } catch (err) {
@@ -109,35 +91,43 @@ app.get('/api/vehicles', async (req, res) => {
   }
 });
 
-// 2. Report Summary Endpoint (Universal for all templates)
+// Operational Report Endpoint (Template ID 2 & Resource 30326456)
 app.get('/api/reports/summary', async (req, res) => {
   const providedKey = req.headers['x-api-key'] || req.query.apiKey;
   if (providedKey !== CLIENT_API_KEY) {
     return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
   }
 
-  // Fallback defaults: Resource 28310909, Template 9 (Fuel Summary), Group 28378146
-  const resourceId = parseInt(req.query.resourceId) || 28310909;
-  const templateId = parseInt(req.query.templateId) || 9;
-  const objectId = parseInt(req.query.objectId) || 28378146;
+  // Pre-configured for Template ID 2, Resource 30326456, Object 30185490
+  const resourceId = parseInt(req.query.resourceId) || 30326456;
+  const templateId = parseInt(req.query.templateId) || 2;
+  const objectId = parseInt(req.query.objectId) || 30185490;
 
-  const from = parseInt(req.query.from) || 1788719400;
-  const to = parseInt(req.query.to) || 1788805799;
+  const targetSection = req.query.section ? String(req.query.section).toLowerCase() : null;
+  const specificTableIndex = req.query.tableIndex !== undefined ? parseInt(req.query.tableIndex) : null;
+
+  // Dynamic "Today" fallback in IST (UTC+5:30)
+  const now = new Date();
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(now.getTime() + istOffsetMs);
+  const istMidnight = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(), 0, 0, 0));
+
+  const defaultFrom = Math.floor((istMidnight.getTime() - istOffsetMs) / 1000);
+  const defaultTo = Math.floor(Date.now() / 1000);
+
+  const from = parseInt(req.query.from) || defaultFrom;
+  const to = parseInt(req.query.to) || defaultTo;
 
   try {
     let eid = await getSession();
 
-    // Step A: Run the report
+    // Direct synchronous report execution (omits remoteExec: 1 to avoid Wialon queue lag)
     const execParams = {
       reportResourceId: resourceId,
       reportTemplateId: templateId,
       reportObjectId: objectId,
       reportObjectSecId: 0,
-      interval: {
-        from: from,
-        to: to,
-        flags: 16777216
-      }
+      interval: { from, to, flags: 16777216 }
     };
 
     let execRes = await axios.get(WIALON_URL, {
@@ -159,61 +149,76 @@ app.get('/api/reports/summary', async (req, res) => {
     const reportTables = execRes.data.reportResult?.tables || [];
     if (reportTables.length === 0) {
       await axios.get(WIALON_URL, { params: { svc: 'report/cleanup_result', params: '{}', sid: eid } });
-      return res.json({
-        status: 'empty',
-        message: 'No report data found for this interval/group.',
-        data: []
-      });
+      return res.json({ status: 'empty', message: 'No tables generated for this interval.', data: [] });
     }
 
-    // Step B: Pull rows from table index 0
-    const rowParams = {
-      tableIndex: 0,
-      config: {
-        type: 'range',
-        data: { from: 0, to: 1000, level: 0 }
-      }
-    };
-
-    const rowsRes = await axios.get(WIALON_URL, {
-      params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
-    });
-
-    // Step C: Cleanup memory on Wialon
-    await axios.get(WIALON_URL, {
-      params: { svc: 'report/cleanup_result', params: '{}', sid: eid }
-    });
-
-    const rawRows = Array.isArray(rowsRes.data) ? rowsRes.data : [];
-    const headers = reportTables[0]?.header || [];
-
-    // Step D: Map cleanly whether it's Fuel (Template 9) or Tracking (Template 6)
-    const cleanVehicles = rawRows.map((row, idx) => {
-      const cols = (row.c || []).map((c) => (typeof c === 'object' ? c.t : c));
-
-      // If Template 9 (Fuel Report)
-      if (templateId === 9) {
-        return {
-          index: idx + 1,
-          vehicleName: cols[1] || 'Unknown Unit',
-          distanceKm: parseMetric(cols[2]),
-          engineHoursFormatted: cols[3] || '0:00:00',
-          engineHoursDecimal: parseDurationToHours(cols[3]),
-          fuelConsumedLiters: parseMetric(cols[4]),
-          fuelOpeningLiters: parseMetric(cols[5]),
-          fuelClosingLiters: parseMetric(cols[6]),
-          refuelingLiters: parseMetric(cols[7]),
-          drainedLiters: parseMetric(cols[8])
-        };
-      }
-
-      // If other templates (e.g. Template 6 Location / General)
-      return {
-        index: idx + 1,
-        vehicleName: row.t || cols[1] || 'Unknown Unit',
-        columns: cols
+    async function fetchTableData(index) {
+      const rowParams = {
+        tableIndex: index,
+        config: { type: 'range', data: { from: 0, to: 1000, level: 0 } }
       };
-    });
+
+      const rowsRes = await axios.get(WIALON_URL, {
+        params: { svc: 'report/select_result_rows', params: JSON.stringify(rowParams), sid: eid }
+      });
+
+      const headers = reportTables[index]?.header || [];
+      const rawRows = Array.isArray(rowsRes.data) ? rowsRes.data : [];
+
+      const rows = rawRows.map((row, rIdx) => {
+        const cols = (row.c || []).map((c) => (typeof c === 'object' ? c.t : c));
+        const rowData = {
+          index: rIdx + 1,
+          entityName: row.t || cols[0] || 'Unknown'
+        };
+
+        headers.forEach((h, hIdx) => {
+          if (cols[hIdx] !== undefined) {
+            rowData[h || `col_${hIdx}`] = cols[hIdx];
+          }
+        });
+
+        return rowData;
+      });
+
+      return {
+        tableIndex: index,
+        sectionName: reportTables[index]?.label || reportTables[index]?.name || `Table_${index}`,
+        totalRows: rows.length,
+        headers,
+        rows
+      };
+    }
+
+    let responsePayload;
+
+    if (targetSection === 'all') {
+      const allSections = [];
+      for (let i = 0; i < reportTables.length; i++) {
+        const tableData = await fetchTableData(i);
+        allSections.push(tableData);
+      }
+      responsePayload = { sections: allSections };
+    } else {
+      let targetIdx = 0;
+
+      if (specificTableIndex !== null && specificTableIndex < reportTables.length) {
+        targetIdx = specificTableIndex;
+      } else if (targetSection) {
+        const found = reportTables.findIndex(
+          (t) =>
+            (t.label && t.label.toLowerCase().includes(targetSection)) ||
+            (t.name && t.name.toLowerCase().includes(targetSection))
+        );
+        if (found !== -1) targetIdx = found;
+      }
+
+      const tableData = await fetchTableData(targetIdx);
+      responsePayload = tableData;
+    }
+
+    // Free Wialon server memory
+    await axios.get(WIALON_URL, { params: { svc: 'report/cleanup_result', params: '{}', sid: eid } });
 
     res.json({
       status: 'success',
@@ -221,7 +226,7 @@ app.get('/api/reports/summary', async (req, res) => {
         resourceId,
         templateId,
         objectId,
-        headers
+        availableSections: reportTables.map((t, idx) => ({ index: idx, name: t.label || t.name }))
       },
       period: {
         fromTimestamp: from,
@@ -229,8 +234,70 @@ app.get('/api/reports/summary', async (req, res) => {
         fromDate: new Date(from * 1000).toISOString(),
         toDate: new Date(to * 1000).toISOString()
       },
-      totalVehicles: cleanVehicles.length,
-      data: cleanVehicles
+      ...responsePayload
+    });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+// List All Report Templates inside this Resource
+app.get('/api/reports/list', async (req, res) => {
+  const providedKey = req.headers['x-api-key'] || req.query.apiKey;
+  if (providedKey !== CLIENT_API_KEY) {
+    return res.status(401).json({ status: 'error', message: 'Unauthorized: Invalid API key' });
+  }
+
+  const targetResourceId = parseInt(req.query.resourceId) || 30326456;
+
+  try {
+    let eid = await getSession();
+
+    const searchParams = {
+      spec: { itemsType: 'avl_resource', propName: 'sys_name', propValueMask: '*', sortType: 'sys_name' },
+      force: 1,
+      flags: 8193,
+      from: 0,
+      to: 0
+    };
+
+    let result = await axios.get(WIALON_URL, {
+      params: { svc: 'core/search_items', params: JSON.stringify(searchParams), sid: eid }
+    });
+
+    if (result.data.error === 1) {
+      sessionId = null;
+      eid = await getSession();
+      result = await axios.get(WIALON_URL, {
+        params: { svc: 'core/search_items', params: JSON.stringify(searchParams), sid: eid }
+      });
+    }
+
+    const resources = result.data.items || [];
+    const matchedResource = resources.find((r) => r.id === targetResourceId) || resources[0];
+
+    if (!matchedResource) {
+      return res.status(404).json({ status: 'error', message: 'Resource not found' });
+    }
+
+    const rawTemplates = matchedResource.rep || {};
+    const templateList = Object.keys(rawTemplates).map((id) => {
+      const t = rawTemplates[id];
+      return {
+        templateId: parseInt(id),
+        templateName: t.n,
+        reportType: t.ct,
+        tablesCount: (t.tbl || []).length,
+        tableNames: (t.tbl || []).map((tb) => tb.n)
+      };
+    });
+
+    res.json({
+      status: 'success',
+      resourceId: matchedResource.id,
+      resourceName: matchedResource.nm,
+      totalTemplates: templateList.length,
+      templates: templateList
     });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
@@ -238,5 +305,5 @@ app.get('/api/reports/summary', async (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Analytics API live on port ${PORT}`);
 });
